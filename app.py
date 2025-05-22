@@ -36,7 +36,6 @@ if uploaded_file is not None:
     # Read the CSV file
     try:
         logging.info("Reading CSV file")
-        # Use chunksize for large CSVs
         df_chunks = pd.read_csv(uploaded_file, encoding='utf-8', chunksize=10000)
         df = pd.concat([chunk.fillna('') for chunk in df_chunks])
         logging.info(f"CSV read successfully: {len(df)} rows")
@@ -134,6 +133,10 @@ if uploaded_file is not None:
     def find_valid_permutation(group, prev_balance=None, prioritize_initial=False, max_rows=0):
         indices = list(range(len(group)))
         logging.info(f"Processing group with {len(indices)} rows, using greedy approach")
+        if len(indices) > 50:  # Skip ordering for very large groups
+            logging.warning(f"Group too large ({len(indices)} rows), returning original order")
+            return [group.index[i] for i in indices]
+
         ordered = []
         remaining = indices.copy()
         balance = prev_balance
@@ -196,7 +199,6 @@ if uploaded_file is not None:
         start_time = time.time()
         
         try:
-            grouped = df.groupby(['timestamp', 'inventory'])
             unique_timestamps = sorted(df['timestamp'].dropna().unique())
             progress_bar = st.progress(0)
             total_steps = len(unique_timestamps)
@@ -204,36 +206,21 @@ if uploaded_file is not None:
             for step, timestamp in enumerate(unique_timestamps):
                 logging.info(f"Processing timestamp: {timestamp}")
                 timestamp_rows = df[df['timestamp'] == timestamp]
-                for inventory in sorted(timestamp_rows['inventory'].unique()):
+                inventories = sorted(timestamp_rows['inventory'].unique())
+                
+                for inventory in inventories:
                     logging.info(f"Processing inventory: {inventory}")
-                    try:
-                        t_inv_group = grouped.get_group((timestamp, inventory))
-                        logging.info(f"Inventory group size: {len(t_inv_group)} rows")
-                    except KeyError:
-                        t_inv_group = timestamp_rows[timestamp_rows['inventory'] == inventory]
-                        reordered_indices.extend(t_inv_group.index)
-                        logging.warning(f"Group not found for timestamp {timestamp}, inventory {inventory}")
-                        st.warning(f"Group not found for timestamp {timestamp}, inventory {inventory}. Using original order.")
-                        continue
-
-                    t_inv_group = t_inv_group.sort_index()
-                    asset_groups = t_inv_group.groupby('asset')
-
-                    for asset in sorted(t_inv_group['asset'].unique()):
+                    inv_group = timestamp_rows[timestamp_rows['inventory'] == inventory]
+                    assets = sorted(inv_group['asset'].unique())
+                    
+                    for asset in assets:
                         logging.info(f"Processing asset: {asset}")
-                        try:
-                            t_group = asset_groups.get_group(asset)
-                            logging.info(f"Asset group size: {len(t_group)} rows")
-                        except KeyError:
-                            t_group = t_inv_group[t_inv_group['asset'] == asset]
-                            reordered_indices.extend(t_group.index)
-                            logging.warning(f"Asset group not found for {inventory}, {asset} at {timestamp}")
-                            st.warning(f"Asset group not found for {inventory}, {asset} at {timestamp}. Using original order.")
-                            continue
-
+                        t_group = inv_group[inv_group['asset'] == asset]
+                        logging.info(f"Asset group size: {len(t_group)} rows")
+                        
                         buy_sell_rows = t_group[t_group['action'].str.lower().isin(["buy", "sell"])]
                         non_buy_sell_rows = t_group[~t_group['action'].str.lower().isin(["buy", "sell"])]
-
+                        
                         prev_balance = balance_tracker.get((inventory, asset), None)
                         is_earliest = timestamp == df[(df['inventory'] == inventory) & (df['asset'] == asset)]['timestamp'].min()
 
