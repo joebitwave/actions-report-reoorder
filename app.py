@@ -24,6 +24,9 @@ if uploaded_file is not None:
         # Read the CSV file
         df = pd.read_csv(uploaded_file)
 
+        # Display column names for debugging
+        st.write("Columns in uploaded CSV:", list(df.columns))
+
         # Define required columns and possible aliases for inventory
         required_columns = ['timestamp', 'action', 'asset', 'assetUnitAdj', 'assetBalance']
         inventory_aliases = ['inventory', 'Inventory', 'inventory_name', 'inv']
@@ -46,7 +49,7 @@ if uploaded_file is not None:
                 if inventory_col and inventory_col in df.columns:
                     df = df.rename(columns={inventory_col: 'inventory'})
                 else:
-                    st.error("Specified inventory column not found in the CSV.")
+                    st.error("Specified inventory column not found in the CSV. Available columns: " + ", ".join(df.columns))
                     st.stop()
             else:
                 if inventory_col != 'inventory':
