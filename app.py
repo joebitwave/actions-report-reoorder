@@ -13,11 +13,20 @@ uploaded_file = st.file_uploader("Upload your Actions Report CSV", type=["csv"])
 if uploaded_file is not None:
     # Read the CSV file
     try:
-        df = pd.read_csv(uploaded_file)
+        # Read CSV with explicit dtype for timestamp to ensure strings
+        df = pd.read_csv(uploaded_file, dtype={3: str, 27: str, 9: str}, keep_default_na=False)
     except Exception as e:
         st.error(f"Error reading CSV: {str(e)}")
         st.write("Please ensure the CSV is properly formatted with headers.")
         st.stop()
+    
+    # Replace empty strings or NaN-like values with 'Unknown' in inventory and asset
+    df[df.columns[27]] = df[df.columns[27]].replace('', 'Unknown').fillna('Unknown')  # inventory (AC)
+    df[df.columns[9]] = df[df.columns[9]].replace('', 'Unknown').fillna('Unknown')    # asset (J)
+    
+    # Debug: Display unique timestamp and inventory values
+    st.write("Unique timestamp values:", df[df.columns[3]].unique().tolist())
+    st.write("Unique inventory values:", df[df.columns[27]].unique().tolist())
     
     # Display original data
     st.write(f"Original CSV Data ({len(df)} rows):")
@@ -42,8 +51,11 @@ if uploaded_file is not None:
         for i, idx in enumerate(indices):
             row = group.iloc[idx]
             action = row["action"].lower()  # action (E)
-            units = row[df.columns[11]]  # assetUnitAdj (L)
-            current_balance = row[df.columns[12]]  # assetBalance (M)
+            try:
+                units = float(row[df.columns[11]])  # assetUnitAdj (L)
+                current_balance = float(row[df.columns[12]])  # assetBalance (M)
+            except (ValueError, TypeError):
+                return False  # Skip rows with non-numeric values
             
             if action == "buy":
                 expected_balance = balance + units
@@ -62,7 +74,7 @@ if uploaded_file is not None:
         indices = list(range(len(group)))
         if prioritize_initial:
             # Try permutations starting with rows where assetUnitAdj == assetBalance
-            initial_indices = [i for i in indices if abs(group.iloc[i][df.columns[11]] - group.iloc[i][df.columns[12]]) < 1e-6]
+            initial_indices = [i for i in indices if abs(float(group.iloc[i][df.columns[11]]) - float(group.iloc[i][df.columns[12]])) < 1e-6]
             for start_idx in initial_indices:
                 other_indices = [i for i in indices if i != start_idx]
                 for perm in permutations(other_indices):
@@ -79,11 +91,21 @@ if uploaded_file is not None:
     def reorder_dataframe(df):
         # Create a copy to avoid modifying the original
         df = df.copy()
+        # Ensure timestamp is string
+        df[df.columns[3]] = df[df.columns[3]].astype(str)
         # Sort by timestamp to ensure chronological order
-        df = df.sort_values(by=df.columns[3], kind='mergesort')  # Stable sort
+        try:
+            df = df.sort_values(by=df.columns[3], kind='mergesort')  # Stable sort
+        except Exception as e:
+            st.error(f"Error sorting by timestamp: {str(e)}")
+            st.write("Timestamp values:", df[df.columns[3]].unique().tolist())
+            st.stop()
         
         # Initialize list to collect reordered indices
         reordered_indices = []
+        
+        # Track previous balances for each inventory + asset
+        balance_tracker = {}
         
         # Group by timestamp and inventory to ensure same inventory rows are together
         grouped = df.groupby([df.columns[3], df.columns[27]])  # timestamp, inventory
@@ -114,7 +136,7 @@ if uploaded_file is not None:
                     non_buy_sell_rows = t_group[~t_group["action"].str.lower().isin(["buy", "sell"])]
                     
                     # Get previous balance for this inventory + asset
-                    prev_balance = None
+                    prev_balance = balance_tracker.get((inventory, asset), None)
                     # Check if this is the earliest timestamp for this inventory + asset
                     is_earliest = timestamp == df[(df[df.columns[27]] == inventory) & (df[df.columns[9]] == asset)][df.columns[3]].min()
                     
@@ -122,16 +144,24 @@ if uploaded_file is not None:
                         # Find valid order, prioritizing initial balance rows for earliest timestamp
                         valid_order = find_valid_permutation(buy_sell_rows, prev_balance, prioritize_initial=is_earliest)
                         buy_sell_ordered = buy_sell_rows.loc[valid_order]
+                        # Update balance tracker with the last balance
+                        balance_tracker[(inventory, asset)] = float(buy_sell_ordered.iloc[-1][df.columns[12]])
                     elif len(buy_sell_rows) == 1:
                         # Single buy/sell row: verify balance if prev_balance exists
                         row = buy_sell_rows.iloc[0]
-                        units = row[df.columns[11]]
-                        current_balance = row[df.columns[12]]
+                        try:
+                            units = float(row[df.columns[11]])
+                            current_balance = float(row[df.columns[12]])
+                        except (ValueError, TypeError):
+                            st.warning(f"Non-numeric assetUnitAdj or assetBalance for {inventory}, {asset} at {timestamp}")
+                            buy_sell_ordered = buy_sell_rows
+                            continue
                         if prev_balance is not None:
                             expected_balance = prev_balance + units if row["action"].lower() == "buy" else prev_balance - units
                             if abs(expected_balance - current_balance) > 1e-6:
                                 st.warning(f"Balance mismatch for {inventory}, {asset} at {timestamp}: expected {expected_balance}, got {current_balance}")
                         buy_sell_ordered = buy_sell_rows
+                        balance_tracker[(inventory, asset)] = current_balance
                     else:
                         buy_sell_ordered = buy_sell_rows
                     
