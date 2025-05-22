@@ -13,7 +13,7 @@ uploaded_file = st.file_uploader("Upload your Actions Report CSV", type=["csv"])
 if uploaded_file is not None:
     # Read the CSV file
     try:
-        # Read CSV with explicit dtype for timestamp to ensure strings
+        # Read CSV with explicit dtype for timestamp, inventory, and asset
         df = pd.read_csv(uploaded_file, dtype={3: str, 27: str, 9: str}, keep_default_na=False)
     except Exception as e:
         st.error(f"Error reading CSV: {str(e)}")
@@ -25,8 +25,14 @@ if uploaded_file is not None:
     df[df.columns[9]] = df[df.columns[9]].replace('', 'Unknown').fillna('Unknown')    # asset (J)
     
     # Debug: Display unique timestamp and inventory values
-    st.write("Unique timestamp values:", df[df.columns[3]].unique().tolist())
-    st.write("Unique inventory values:", df[df.columns[27]].unique().tolist())
+    st.write("Unique timestamp values:", sorted(df[df.columns[3]].unique().tolist()))
+    st.write("Unique inventory values:", sorted(df[df.columns[27]].unique().tolist()))
+    
+    # Check for rows with missing or invalid inventory
+    invalid_inventory_rows = df[df[df.columns[27]] == 'Unknown']
+    if not invalid_inventory_rows.empty:
+        st.warning(f"Found {len(invalid_inventory_rows)} rows with missing or invalid inventory values. Assigned 'Unknown'.")
+        st.write("Sample invalid inventory rows:", invalid_inventory_rows[['timestamp', 'inventory', 'asset']].head().to_dict())
     
     # Display original data
     st.write(f"Original CSV Data ({len(df)} rows):")
@@ -47,7 +53,7 @@ if uploaded_file is not None:
     
     # Function to validate balance transitions for a sequence of buy/sell transactions
     def is_valid_order(group, indices, prev_balance=None):
-        balance = prev_balance if prev_balance is not None else group.iloc[indices[0]][df.columns[12]]  # assetBalance (M)
+        balance = prev_balance if prev_balance is not None else float(group.iloc[indices[0]][df.columns[12]])  # assetBalance (M)
         for i, idx in enumerate(indices):
             row = group.iloc[idx]
             action = row["action"].lower()  # action (E)
@@ -98,7 +104,7 @@ if uploaded_file is not None:
             df = df.sort_values(by=df.columns[3], kind='mergesort')  # Stable sort
         except Exception as e:
             st.error(f"Error sorting by timestamp: {str(e)}")
-            st.write("Timestamp values:", df[df.columns[3]].unique().tolist())
+            st.write("Timestamp values:", sorted(df[df.columns[3]].unique().tolist()))
             st.stop()
         
         # Initialize list to collect reordered indices
@@ -118,7 +124,8 @@ if uploaded_file is not None:
                 try:
                     t_inv_group = grouped.get_group((timestamp, inventory))
                 except KeyError:
-                    continue  # Skip if group not found
+                    st.warning(f"Group not found for timestamp {timestamp}, inventory {inventory}. Skipping.")
+                    continue
                 
                 # Sort by original index to preserve non-buy/sell order
                 t_inv_group = t_inv_group.sort_index()
@@ -129,6 +136,7 @@ if uploaded_file is not None:
                     try:
                         t_group = asset_groups.get_group(asset)
                     except KeyError:
+                        st.warning(f"Asset group not found for {inventory}, {asset} at {timestamp}. Skipping.")
                         continue
                     
                     # Split into buy/sell and non-buy/sell rows
@@ -145,7 +153,10 @@ if uploaded_file is not None:
                         valid_order = find_valid_permutation(buy_sell_rows, prev_balance, prioritize_initial=is_earliest)
                         buy_sell_ordered = buy_sell_rows.loc[valid_order]
                         # Update balance tracker with the last balance
-                        balance_tracker[(inventory, asset)] = float(buy_sell_ordered.iloc[-1][df.columns[12]])
+                        try:
+                            balance_tracker[(inventory, asset)] = float(buy_sell_ordered.iloc[-1][df.columns[12]])
+                        except (ValueError, TypeError):
+                            st.warning(f"Non-numeric assetBalance in last row for {inventory}, {asset} at {timestamp}. Using original order.")
                     elif len(buy_sell_rows) == 1:
                         # Single buy/sell row: verify balance if prev_balance exists
                         row = buy_sell_rows.iloc[0]
@@ -153,8 +164,9 @@ if uploaded_file is not None:
                             units = float(row[df.columns[11]])
                             current_balance = float(row[df.columns[12]])
                         except (ValueError, TypeError):
-                            st.warning(f"Non-numeric assetUnitAdj or assetBalance for {inventory}, {asset} at {timestamp}")
+                            st.warning(f"Non-numeric assetUnitAdj or assetBalance for {inventory}, {asset} at {timestamp}. Using original order.")
                             buy_sell_ordered = buy_sell_rows
+                            balance_tracker[(inventory, asset)] = None
                             continue
                         if prev_balance is not None:
                             expected_balance = prev_balance + units if row["action"].lower() == "buy" else prev_balance - units
@@ -172,23 +184,27 @@ if uploaded_file is not None:
                     else:
                         reordered_indices.extend(buy_sell_ordered.index)
         
-        # Include any remaining rows (e.g., missing inventory/asset)
+        # Include any remaining rows
         remaining_indices = df.index[~df.index.isin(reordered_indices)]
         if remaining_indices.size > 0:
-            st.warning(f"Found {len(remaining_indices)} rows with missing inventory or asset values. Including them in chronological order.")
+            st.warning(f"Found {len(remaining_indices)} rows not processed. Including them in original order.")
             reordered_indices.extend(remaining_indices)
         
         # Ensure all rows are included
         if len(reordered_indices) != len(df):
             st.error(f"Row count mismatch: expected {len(df)} rows, got {len(reordered_indices)}.")
+            st.write("Processed indices:", len(reordered_indices))
             st.stop()
         
-        # Reorder the DataFrame and ensure chronological order
-        reordered_df = df.loc[reordered_indices].sort_values(by=df.columns[3], kind='mergesort').reset_index(drop=True)
+        # Reorder the DataFrame
+        reordered_df = df.loc[reordered_indices].reset_index(drop=True)
         
         # Verify chronological order
-        if not reordered_df[df.columns[3]].is_monotonic_increasing:
-            st.warning("Output rows are not in strict chronological order. Please check the timestamp column.")
+        try:
+            if not reordered_df[df.columns[3]].astype(str).is_monotonic_increasing:
+                st.warning("Output rows are not in strict chronological order. Please check the timestamp column.")
+        except Exception as e:
+            st.warning(f"Error verifying chronological order: {str(e)}")
         
         return reordered_df
 
