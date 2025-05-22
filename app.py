@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import io
 from datetime import datetime
-from itertools import permutations
 
 # Set page configuration
 st.set_page_config(page_title="Transaction Reordering App", layout="wide")
@@ -14,41 +13,39 @@ st.markdown("Upload a CSV file to reorder transactions based on timestamp, inven
 # File uploader
 uploaded_file = st.file_uploader("Choose a CSV file", type=["csv"])
 
-def find_valid_permutation(rows, start_balance):
+def order_rows_by_balance(rows):
     """
-    Find a permutation of rows where assetBalance = previous assetBalance + assetUnitAdj.
-    Start with a row where assetBalance equals assetUnitAdj.
-    Returns None if no valid permutation is found.
+    Order rows to satisfy assetBalance = previous assetBalance + assetUnitAdj.
+    Use a greedy approach: start with a row where assetBalance = assetUnitAdj,
+    then select rows where assetBalance matches the expected next balance.
+    Returns None if no valid order is found.
     """
     if rows.empty:
         return None
     
-    # Try each row as the starting point
-    for start_idx in range(len(rows)):
-        if abs(rows.iloc[start_idx]['assetBalance'] - rows.iloc[start_idx]['assetUnitAdj']) < 1e-10:
-            start_row = rows.iloc[[start_idx]]
-            remaining_rows = rows.drop(start_row.index)
-            
-            # Test permutations of remaining rows
-            for perm in permutations(remaining_rows.index):
-                ordered_rows = [start_row]
-                current_balance = start_row['assetBalance'].iloc[0]
-                
-                # Check if permutation maintains balance
-                valid = True
-                for idx in perm:
-                    row = remaining_rows.loc[[idx]]
-                    expected_balance = current_balance + row['assetUnitAdj'].iloc[0]
-                    if abs(row['assetBalance'].iloc[0] - expected_balance) > 1e-10:
-                        valid = False
-                        break
-                    ordered_rows.append(row)
-                    current_balance = row['assetBalance'].iloc[0]
-                
-                if valid:
-                    return pd.concat(ordered_rows, ignore_index=True)
+    # Find a starting row where assetBalance = assetUnitAdj
+    start_candidates = rows[abs(rows['assetBalance'] - rows['assetUnitAdj']) < 1e-10]
+    if start_candidates.empty:
+        return None
     
-    return None  # No valid permutation found
+    # Use the first candidate as the starting point
+    start_row = start_candidates.iloc[[0]]
+    ordered_rows = [start_row]
+    current_balance = start_row['assetBalance'].iloc[0]
+    remaining_rows = rows.drop(start_row.index)
+    
+    # Greedily select rows that match the expected balance
+    while not remaining_rows.empty:
+        next_row = remaining_rows[abs(remaining_rows['assetBalance'] - (current_balance + remaining_rows['assetUnitAdj'])) < 1e-10]
+        if next_row.empty:
+            return None  # No valid next row found
+        # Take the first matching row
+        next_row = next_row.iloc[[0]]
+        ordered_rows.append(next_row)
+        current_balance = next_row['assetBalance'].iloc[0]
+        remaining_rows = remaining_rows.drop(next_row.index)
+    
+    return pd.concat(ordered_rows, ignore_index=True)
 
 if uploaded_file is not None:
     try:
@@ -72,11 +69,21 @@ if uploaded_file is not None:
             if df['assetUnitAdj'].isna().any() or df['assetBalance'].isna().any():
                 st.error("Invalid or missing numeric data in 'assetUnitAdj' or 'assetBalance' columns.")
             else:
+                # Initialize progress bar
+                st.write("Processing file...")
+                progress_bar = st.progress(0)
+                total_groups = len(df.groupby(['inventory', 'asset']))
+                processed_groups = 0
+
                 # Initialize output DataFrame
                 output_df = pd.DataFrame()
 
                 # Group by inventory and asset to process each combination
                 for (inventory, asset), group in df.groupby(['inventory', 'asset']):
+                    # Update progress
+                    processed_groups += 1
+                    progress_bar.progress(min(processed_groups / total_groups, 1.0))
+
                     # Split into action rows (buy/sell) and non-action rows
                     action_rows = group[group['action'].isin(['buy', 'sell'])].copy()
                     non_action_rows = group[~group['action'].isin(['buy', 'sell'])].copy()
@@ -88,8 +95,12 @@ if uploaded_file is not None:
                         ordered_action_rows = []
 
                         for ts, ts_group in grouped_by_ts:
-                            # Find valid permutation for this timestamp
-                            valid_order = find_valid_permutation(ts_group, None)
+                            # Warn if group is large
+                            if len(ts_group) > 10:
+                                st.warning(f"Large group ({len(ts_group)} rows) for asset '{asset}' and inventory '{inventory}' at timestamp '{ts}'. Processing may be slow.")
+
+                            # Order rows by balance condition
+                            valid_order = order_rows_by_balance(ts_group)
                             if valid_order is None:
                                 st.error(f"No valid order found for asset '{asset}' and inventory '{inventory}' at timestamp '{ts}'. Rows:\n{ts_group[['timestamp', 'action', 'assetUnitAdj', 'assetBalance']].to_string()}")
                                 raise ValueError(f"Cannot satisfy assetBalance condition for {asset} in {inventory} at {ts}")
@@ -126,6 +137,8 @@ if uploaded_file is not None:
                     file_name=f"reordered_transactions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                     mime="text/csv"
                 )
+
+                st.success("Processing complete!")
 
     except Exception as e:
         st.error(f"Error processing file: {str(e)}")
