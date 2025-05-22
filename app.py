@@ -20,7 +20,7 @@ if uploaded_file is not None:
         st.stop()
     
     # Display original data
-    st.write("Original CSV Data:")
+    st.write(f"Original CSV Data ({len(df)} rows):")
     st.dataframe(df)
     
     # Validate required columns
@@ -67,17 +67,26 @@ if uploaded_file is not None:
 
     # Reorder the DataFrame
     def reorder_dataframe(df):
-        # Sort by timestamp first
+        # Create a copy to avoid modifying the original
+        df = df.copy()
+        # Sort by timestamp first to ensure chronological order
         df = df.sort_values(by=df.columns[3])  # timestamp (D)
+        
+        # Initialize list to collect all reordered indices
+        reordered_indices = []
         
         # Group by inventory (AC) and asset (J)
         grouped = df.groupby([df.columns[27], df.columns[9]])  # inventory and asset
         
-        reordered_indices = []
-        for _, group in grouped:
-            # Further group by timestamp to handle ties
+        for (inv, asset), group in grouped:
+            # Sort group by timestamp to ensure consistency
+            group = group.sort_values(by=df.columns[3])
+            # Group by timestamp to handle ties
             timestamp_groups = group.groupby(df.columns[3])
-            for _, t_group in timestamp_groups:
+            
+            for timestamp, t_group in timestamp_groups:
+                # Sort by index to preserve original order for non-buy/sell rows
+                t_group = t_group.sort_index()
                 # Split into buy/sell and non-buy/sell rows
                 buy_sell_rows = t_group[t_group["action"].str.lower().isin(["buy", "sell"])]
                 non_buy_sell_rows = t_group[~t_group["action"].str.lower().isin(["buy", "sell"])]
@@ -96,15 +105,27 @@ if uploaded_file is not None:
                 else:
                     reordered_indices.extend(buy_sell_ordered.index)
         
+        # Include any rows not in the grouped data (e.g., missing inventory/asset)
+        remaining_indices = df.index[~df.index.isin(reordered_indices)]
+        if remaining_indices.size > 0:
+            st.warning(f"Found {len(remaining_indices)} rows with missing inventory or asset values. Including them in original order.")
+            reordered_indices.extend(remaining_indices)
+        
+        # Ensure all rows are included
+        if len(reordered_indices) != len(df):
+            st.error(f"Row count mismatch: expected {len(df)} rows, got {len(reordered_indices)}.")
+            st.stop()
+        
         # Reorder the DataFrame based on indices
-        return df.loc[reordered_indices].reset_index(drop=True)
+        reordered_df = df.loc[reordered_indices].reset_index(drop=True)
+        return reordered_df
 
     # Process the CSV
     try:
         reordered_df = reorder_dataframe(df)
         
         # Display reordered data
-        st.write("Reordered CSV Data:")
+        st.write(f"Reordered CSV Data ({len(reordered_df)} rows):")
         st.dataframe(reordered_df)
         
         # Function to convert DataFrame to CSV and create download link
