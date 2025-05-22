@@ -24,15 +24,15 @@ if uploaded_file is not None:
     st.dataframe(df)
     
     # Validate required columns
-    required_cols = [3, 4, 9, 11, 12, 27]  # Indices for timestamp, type, asset, assetUnitAdj, assetBalance, inventory
+    required_cols = [3, 4, 9, 11, 12, 27]  # Indices for timestamp, action, asset, assetUnitAdj, assetBalance, inventory
     if len(df.columns) < max(required_cols) + 1:
         st.error(f"CSV has too few columns. Expected at least {max(required_cols) + 1}, found {len(df.columns)}.")
         st.write("Available columns:", list(df.columns))
         st.stop()
     
-    # Check if 'type' column exists
-    if "type" not in df.columns:
-        st.error("CSV is missing the 'type' column (expected in Column E).")
+    # Check if 'action' column exists
+    if "action" not in df.columns:
+        st.error("CSV is missing the 'action' column (expected in Column E).")
         st.write("Available columns:", list(df.columns))
         st.stop()
     
@@ -41,7 +41,7 @@ if uploaded_file is not None:
         balance = prev_balance if prev_balance is not None else group.iloc[0][df.columns[12]]  # assetBalance (M)
         for idx in indices:
             row = group.iloc[idx]
-            action = row["type"].lower()  # type (E)
+            action = row["action"].lower()  # action (E)
             units = row[df.columns[11]]  # assetUnitAdj (L)
             current_balance = row[df.columns[12]]  # assetBalance (M)
             
@@ -79,8 +79,8 @@ if uploaded_file is not None:
             timestamp_groups = group.groupby(df.columns[3])
             for _, t_group in timestamp_groups:
                 # Split into buy/sell and non-buy/sell rows
-                buy_sell_rows = t_group[t_group["type"].str.lower().isin(["buy", "sell"])]
-                non_buy_sell_rows = t_group[~t_group["type"].str.lower().isin(["buy", "sell"])]
+                buy_sell_rows = t_group[t_group["action"].str.lower().isin(["buy", "sell"])]
+                non_buy_sell_rows = t_group[~t_group["action"].str.lower().isin(["buy", "sell"])]
                 
                 if len(buy_sell_rows) > 1:
                     # Find valid order for buy/sell rows with tied timestamps
@@ -121,4 +121,4 @@ if uploaded_file is not None:
     except Exception as e:
         st.error(f"Error processing the CSV: {str(e)}")
         st.write("Available columns:", list(df.columns))
-        st.write("Please ensure the CSV has the required columns in the correct positions (timestamp in Column D, type in E, asset in J, assetUnitAdj in L, assetBalance in M, inventory in AC).")
+        st.write("Please ensure the CSV has the required columns in the correct positions (timestamp in Column D, action in E, asset in J, assetUnitAdj in L, assetBalance in M, inventory in AC).")
