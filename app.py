@@ -69,23 +69,27 @@ if uploaded_file is not None:
     def reorder_dataframe(df):
         # Create a copy to avoid modifying the original
         df = df.copy()
-        # Sort by timestamp first to ensure chronological order
-        df = df.sort_values(by=df.columns[3])  # timestamp (D)
+        # Sort by timestamp to ensure chronological order
+        df = df.sort_values(by=df.columns[3], kind='mergesort')  # Stable sort
         
-        # Initialize list to collect all reordered indices
+        # Initialize list to collect reordered indices
         reordered_indices = []
+        # Group by inventory, asset, and timestamp to identify tied buy/sell rows
+        grouped = df.groupby([df.columns[27], df.columns[9], df.columns[3]])  # inventory, asset, timestamp
         
-        # Group by inventory (AC) and asset (J)
-        grouped = df.groupby([df.columns[27], df.columns[9]])  # inventory and asset
-        
-        for (inv, asset), group in grouped:
-            # Sort group by timestamp to ensure consistency
-            group = group.sort_values(by=df.columns[3])
-            # Group by timestamp to handle ties
-            timestamp_groups = group.groupby(df.columns[3])
-            
-            for timestamp, t_group in timestamp_groups:
-                # Sort by index to preserve original order for non-buy/sell rows
+        # Iterate over sorted timestamps to maintain chronological order
+        for timestamp in sorted(df[df.columns[3]].unique()):
+            # Get all rows for this timestamp
+            timestamp_rows = df[df[df.columns[3]] == timestamp]
+            # Process each inventory + asset group within this timestamp
+            for (inv, asset), group in timestamp_rows.groupby([df.columns[27], df.columns[9]]):
+                # Get the corresponding group from the grouped object
+                try:
+                    t_group = grouped.get_group((inv, asset, timestamp))
+                except KeyError:
+                    continue  # Skip if group not found (shouldn't happen)
+                
+                # Sort by original index to preserve non-buy/sell order
                 t_group = t_group.sort_index()
                 # Split into buy/sell and non-buy/sell rows
                 buy_sell_rows = t_group[t_group["action"].str.lower().isin(["buy", "sell"])]
@@ -98,17 +102,17 @@ if uploaded_file is not None:
                 else:
                     buy_sell_ordered = buy_sell_rows
                 
-                # Combine buy/sell and non-buy/sell rows, preserving non-buy/sell relative order
+                # Combine buy/sell and non-buy/sell rows
                 if not non_buy_sell_rows.empty:
                     combined = pd.concat([buy_sell_ordered, non_buy_sell_rows]).sort_index()
                     reordered_indices.extend(combined.index)
                 else:
                     reordered_indices.extend(buy_sell_ordered.index)
         
-        # Include any rows not in the grouped data (e.g., missing inventory/asset)
+        # Include any remaining rows (e.g., missing inventory/asset)
         remaining_indices = df.index[~df.index.isin(reordered_indices)]
         if remaining_indices.size > 0:
-            st.warning(f"Found {len(remaining_indices)} rows with missing inventory or asset values. Including them in original order.")
+            st.warning(f"Found {len(remaining_indices)} rows with missing inventory or asset values. Including them in chronological order.")
             reordered_indices.extend(remaining_indices)
         
         # Ensure all rows are included
@@ -116,8 +120,13 @@ if uploaded_file is not None:
             st.error(f"Row count mismatch: expected {len(df)} rows, got {len(reordered_indices)}.")
             st.stop()
         
-        # Reorder the DataFrame based on indices
-        reordered_df = df.loc[reordered_indices].reset_index(drop=True)
+        # Reorder the DataFrame based on indices and ensure chronological order
+        reordered_df = df.loc[reordered_indices].sort_values(by=df.columns[3], kind='mergesort').reset_index(drop=True)
+        
+        # Verify chronological order
+        if not reordered_df[df.columns[3]].is_monotonic_increasing:
+            st.warning("Output rows are not in strict chronological order. Please check the timestamp column.")
+        
         return reordered_df
 
     # Process the CSV
