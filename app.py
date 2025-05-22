@@ -13,26 +13,26 @@ uploaded_file = st.file_uploader("Upload your Actions Report CSV", type=["csv"])
 if uploaded_file is not None:
     # Read the CSV file
     try:
-        # Read CSV with explicit dtype for timestamp, inventory, and asset
-        df = pd.read_csv(uploaded_file, dtype={3: str, 27: str, 9: str}, keep_default_na=False)
+        # Read CSV with utf-8 encoding and string dtypes for key columns
+        df = pd.read_csv(uploaded_file, encoding='utf-8', dtype={3: str, 27: str, 9: str})
     except Exception as e:
         st.error(f"Error reading CSV: {str(e)}")
         st.write("Please ensure the CSV is properly formatted with headers.")
         st.stop()
     
-    # Replace empty strings or NaN-like values with 'Unknown' in inventory and asset
-    df[df.columns[27]] = df[df.columns[27]].replace('', 'Unknown').fillna('Unknown')  # inventory (AC)
-    df[df.columns[9]] = df[df.columns[9]].replace('', 'Unknown').fillna('Unknown')    # asset (J)
+    # Replace NaN with empty string to preserve valid values
+    df = df.fillna('')
     
     # Debug: Display unique timestamp and inventory values
     st.write("Unique timestamp values:", sorted(df[df.columns[3]].unique().tolist()))
     st.write("Unique inventory values:", sorted(df[df.columns[27]].unique().tolist()))
     
-    # Check for rows with missing or invalid inventory
-    invalid_inventory_rows = df[df[df.columns[27]] == 'Unknown']
+    # Check for rows with missing or empty inventory
+    invalid_inventory_rows = df[df[df.columns[27]].str.strip() == '']
     if not invalid_inventory_rows.empty:
-        st.warning(f"Found {len(invalid_inventory_rows)} rows with missing or invalid inventory values. Assigned 'Unknown'.")
+        st.warning(f"Found {len(invalid_inventory_rows)} rows with missing or empty inventory values. Assigned 'Unknown'.")
         st.write("Sample invalid inventory rows:", invalid_inventory_rows[['timestamp', 'inventory', 'asset']].head().to_dict())
+        df.loc[df[df.columns[27]].str.strip() == '', df.columns[27]] = 'Unknown'
     
     # Display original data
     st.write(f"Original CSV Data ({len(df)} rows):")
@@ -53,7 +53,13 @@ if uploaded_file is not None:
     
     # Function to validate balance transitions for a sequence of buy/sell transactions
     def is_valid_order(group, indices, prev_balance=None):
-        balance = prev_balance if prev_balance is not None else float(group.iloc[indices[0]][df.columns[12]])  # assetBalance (M)
+        balance = prev_balance if prev_balance is not None else None
+        if balance is None:
+            try:
+                balance = float(group.iloc[indices[0]][df.columns[12]])  # assetBalance (M)
+            except (ValueError, TypeError):
+                return False
+        
         for i, idx in enumerate(indices):
             row = group.iloc[idx]
             action = row["action"].lower()  # action (E)
@@ -113,6 +119,13 @@ if uploaded_file is not None:
         # Track previous balances for each inventory + asset
         balance_tracker = {}
         
+        # Log non-numeric assetUnitAdj or assetBalance
+        non_numeric_rows = df[df[df.columns[11]].apply(lambda x: not isinstance(x, (int, float)) and not str(x).replace('.', '').replace('-', '').isdigit()) | 
+                             df[df.columns[12]].apply(lambda x: not isinstance(x, (int, float)) and not str(x).replace('.', '').replace('-', '').isdigit())]
+        if not non_numeric_rows.empty:
+            st.warning(f"Found {len(non_numeric_rows)} rows with non-numeric assetUnitAdj or assetBalance. These will use original order.")
+            st.write("Sample non-numeric rows:", non_numeric_rows[['timestamp', 'inventory', 'asset', 'assetUnitAdj', 'assetBalance']].head().to_dict())
+        
         # Group by timestamp and inventory to ensure same inventory rows are together
         grouped = df.groupby([df.columns[3], df.columns[27]])  # timestamp, inventory
         
@@ -124,7 +137,9 @@ if uploaded_file is not None:
                 try:
                     t_inv_group = grouped.get_group((timestamp, inventory))
                 except KeyError:
-                    st.warning(f"Group not found for timestamp {timestamp}, inventory {inventory}. Skipping.")
+                    st.warning(f"Group not found for timestamp {timestamp}, inventory {inventory}. Including rows in original order.")
+                    t_inv_group = timestamp_rows[timestamp_rows[df.columns[27]] == inventory]
+                    reordered_indices.extend(t_inv_group.index)
                     continue
                 
                 # Sort by original index to preserve non-buy/sell order
@@ -136,7 +151,9 @@ if uploaded_file is not None:
                     try:
                         t_group = asset_groups.get_group(asset)
                     except KeyError:
-                        st.warning(f"Asset group not found for {inventory}, {asset} at {timestamp}. Skipping.")
+                        st.warning(f"Asset group not found for {inventory}, {asset} at {timestamp}. Including rows in original order.")
+                        t_group = t_inv_group[t_inv_group[df.columns[9]] == asset]
+                        reordered_indices.extend(t_group.index)
                         continue
                     
                     # Split into buy/sell and non-buy/sell rows
@@ -156,7 +173,7 @@ if uploaded_file is not None:
                         try:
                             balance_tracker[(inventory, asset)] = float(buy_sell_ordered.iloc[-1][df.columns[12]])
                         except (ValueError, TypeError):
-                            st.warning(f"Non-numeric assetBalance in last row for {inventory}, {asset} at {timestamp}. Using original order.")
+                            st.warning(f"Non-numeric assetBalance in last row for {inventory}, {asset} at {timestamp}. Skipping balance update.")
                     elif len(buy_sell_rows) == 1:
                         # Single buy/sell row: verify balance if prev_balance exists
                         row = buy_sell_rows.iloc[0]
