@@ -37,13 +37,18 @@ if uploaded_file is not None:
         st.stop()
     
     # Function to validate balance transitions for a sequence of buy/sell transactions
-    def is_valid_order(group, indices, prev_balance=None):
-        balance = prev_balance if prev_balance is not None else group.iloc[0][df.columns[12]]  # assetBalance (M)
-        for idx in indices:
+    def is_valid_order(group, indices, prev_balance=None, is_first_group=False):
+        balance = prev_balance if prev_balance is not None else group.iloc[indices[0]][df.columns[12]]  # assetBalance (M)
+        for i, idx in enumerate(indices):
             row = group.iloc[idx]
             action = row["action"].lower()  # action (E)
             units = row[df.columns[11]]  # assetUnitAdj (L)
             current_balance = row[df.columns[12]]  # assetBalance (M)
+            
+            # For the first row of the first timestamp group, check if assetUnitAdj == assetBalance
+            if is_first_group and i == 0:
+                if abs(units - current_balance) > 1e-6:  # Allow for float precision
+                    return False
             
             if action == "buy":
                 expected_balance = balance + units
@@ -58,10 +63,22 @@ if uploaded_file is not None:
         return True
 
     # Function to find a valid permutation for tied-timestamp buy/sell rows
-    def find_valid_permutation(group):
+    def find_valid_permutation(group, prev_balance=None, is_first_group=False):
         indices = list(range(len(group)))
+        # If first group, prioritize row where assetUnitAdj == assetBalance
+        if is_first_group:
+            for idx in indices:
+                row = group.iloc[idx]
+                if abs(row[df.columns[11]] - row[df.columns[12]]) < 1e-6:
+                    # Try permutations starting with this row
+                    other_indices = [i for i in indices if i != idx]
+                    for perm in permutations(other_indices):
+                        test_perm = [idx] + list(perm)
+                        if is_valid_order(group, test_perm, prev_balance, is_first_group):
+                            return [group.index[i] for i in test_perm]
+        # Fallback to any valid permutation
         for perm in permutations(indices):
-            if is_valid_order(group, perm):
+            if is_valid_order(group, perm, prev_balance, is_first_group):
                 return [group.index[i] for i in perm]
         return group.index  # Return original order if no valid permutation found
 
@@ -74,21 +91,20 @@ if uploaded_file is not None:
         
         # Initialize list to collect reordered indices
         reordered_indices = []
-        # Group by inventory, asset, and timestamp to identify tied buy/sell rows
-        grouped = df.groupby([df.columns[27], df.columns[9], df.columns[3]])  # inventory, asset, timestamp
         
-        # Iterate over sorted timestamps to maintain chronological order
-        for timestamp in sorted(df[df.columns[3]].unique()):
-            # Get all rows for this timestamp
-            timestamp_rows = df[df[df.columns[3]] == timestamp]
-            # Process each inventory + asset group within this timestamp
-            for (inv, asset), group in timestamp_rows.groupby([df.columns[27], df.columns[9]]):
-                # Get the corresponding group from the grouped object
-                try:
-                    t_group = grouped.get_group((inv, asset, timestamp))
-                except KeyError:
-                    continue  # Skip if group not found (shouldn't happen)
-                
+        # Group by inventory and asset
+        grouped = df.groupby([df.columns[27], df.columns[9]])  # inventory, asset
+        
+        for (inv, asset), group in grouped:
+            # Sort group by timestamp
+            group = group.sort_values(by=df.columns[3], kind='mergesort')
+            # Group by timestamp to handle ties
+            timestamp_groups = group.groupby(df.columns[3])
+            prev_balance = None
+            is_first_group = True
+            
+            for timestamp in sorted(timestamp_groups.groups.keys()):
+                t_group = timestamp_groups.get_group(timestamp)
                 # Sort by original index to preserve non-buy/sell order
                 t_group = t_group.sort_index()
                 # Split into buy/sell and non-buy/sell rows
@@ -96,9 +112,24 @@ if uploaded_file is not None:
                 non_buy_sell_rows = t_group[~t_group["action"].str.lower().isin(["buy", "sell"])]
                 
                 if len(buy_sell_rows) > 1:
-                    # Find valid order for buy/sell rows with tied timestamps
-                    valid_order = find_valid_permutation(buy_sell_rows)
+                    # Find valid order for buy/sell rows
+                    valid_order = find_valid_permutation(buy_sell_rows, prev_balance, is_first_group)
                     buy_sell_ordered = buy_sell_rows.loc[valid_order]
+                    # Update prev_balance to the last balance in the ordered group
+                    prev_balance = buy_sell_ordered.iloc[-1][df.columns[12]]
+                elif len(buy_sell_rows) == 1:
+                    # Single buy/sell row: verify balance if not first group
+                    row = buy_sell_rows.iloc[0]
+                    units = row[df.columns[11]]
+                    current_balance = row[df.columns[12]]
+                    if prev_balance is not None:
+                        expected_balance = prev_balance + units if row["action"].lower() == "buy" else prev_balance - units
+                        if abs(expected_balance - current_balance) > 1e-6:
+                            st.warning(f"Balance mismatch for {inv}, {asset} at {timestamp}: expected {expected_balance}, got {current_balance}")
+                    elif is_first_group and abs(units - current_balance) > 1e-6:
+                        st.warning(f"Initial balance mismatch for {inv}, {asset} at {timestamp}: assetUnitAdj {units} != assetBalance {current_balance}")
+                    buy_sell_ordered = buy_sell_rows
+                    prev_balance = current_balance
                 else:
                     buy_sell_ordered = buy_sell_rows
                 
@@ -108,6 +139,8 @@ if uploaded_file is not None:
                     reordered_indices.extend(combined.index)
                 else:
                     reordered_indices.extend(buy_sell_ordered.index)
+                
+                is_first_group = False
         
         # Include any remaining rows (e.g., missing inventory/asset)
         remaining_indices = df.index[~df.index.isin(reordered_indices)]
@@ -120,7 +153,7 @@ if uploaded_file is not None:
             st.error(f"Row count mismatch: expected {len(df)} rows, got {len(reordered_indices)}.")
             st.stop()
         
-        # Reorder the DataFrame based on indices and ensure chronological order
+        # Reorder the DataFrame and ensure chronological order
         reordered_df = df.loc[reordered_indices].sort_values(by=df.columns[3], kind='mergesort').reset_index(drop=True)
         
         # Verify chronological order
