@@ -21,11 +21,17 @@ uploaded_file = st.file_uploader("Choose a CSV file", type=["csv"])
 
 if uploaded_file is not None:
     try:
-        # Read the CSV file
-        df = pd.read_csv(uploaded_file)
+        # Read the CSV file with explicit UTF-8 encoding
+        df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
 
-        # Display column names for debugging
-        st.write("**Columns in uploaded CSV:**", ", ".join(df.columns))
+        # Trim whitespace from column names
+        df.columns = df.columns.str.strip()
+
+        # Display raw header and parsed columns for debugging
+        with uploaded_file:
+            first_line = uploaded_file.readline().decode('utf-8-sig').strip()
+            st.write("**Raw CSV header:**", first_line)
+        st.write("**Parsed columns in CSV:**", ", ".join(df.columns))
 
         # Define required columns and possible aliases for inventory
         required_columns = ['timestamp', 'action', 'asset', 'assetUnitAdj', 'assetBalance']
@@ -51,7 +57,7 @@ if uploaded_file is not None:
             if inventory_col and inventory_col in df.columns:
                 df = df.rename(columns={inventory_col: 'inventory'})
             else:
-                default_inventory = "Global- Asset Holdings"  # Fallback for filtered data
+                default_inventory = "Global- Asset Holdings"
                 st.warning(f"No inventory column selected. Assuming all transactions are for '{default_inventory}'.")
                 df['inventory'] = default_inventory
         else:
@@ -71,12 +77,9 @@ if uploaded_file is not None:
 
             if not buy_sell.empty:
                 sorted_dfs = []
-                # Group by inventory and asset
                 grouped = buy_sell.groupby(['inventory', 'asset'])
 
                 for (inv, asset), subgroup in grouped:
-                    # Select the earliest transaction as the starting point
-                    # Prefer "Beginning Balance" transactions if available
                     subgroup = subgroup.sort_values('timestamp')
                     if 'description' in subgroup.columns:
                         start_candidates = subgroup[subgroup['description'].str.contains('Beginning Balance', na=False)]
@@ -90,27 +93,22 @@ if uploaded_file is not None:
                     result = start_row.copy()
                     remaining = subgroup.drop(start_row.index).copy()
 
-                    # Iteratively build the sequence
                     while not remaining.empty:
                         last_balance = result.iloc[-1]['assetBalance']
-                        # Find next row where assetBalance ≈ last_balance + assetUnitAdj
                         next_row = remaining[
                             abs((remaining['assetUnitAdj'] + last_balance) - remaining['assetBalance']) < 1e-10
                         ]
                         if next_row.empty:
-                            # Fallback to closest match
                             remaining['balance_diff'] = abs(
                                 (remaining['assetUnitAdj'] + last_balance) - remaining['assetBalance']
                             )
                             next_row = remaining.nsmallest(1, 'balance_diff')
 
-                        # Add the first matching row
                         result = pd.concat([result, next_row.iloc[[0]]], ignore_index=True)
                         remaining = remaining.drop(next_row.index)
 
                     sorted_dfs.append(result.drop(columns=['balance_diff'] if 'balance_diff' in result.columns else []))
 
-                # Combine sorted buy/sell transactions
                 buy_sell_sorted = pd.concat(sorted_dfs, ignore_index=True)
                 return buy_sell_sorted, non_buy_sell
             else:
@@ -123,22 +121,14 @@ if uploaded_file is not None:
         def reassemble_with_timestamps(buy_sell, non_buy_sell):
             if buy_sell.empty and non_buy_sell.empty:
                 return df
-            # Create a list to hold final sorted rows
             final_dfs = []
-            # Group non-buy/sell by timestamp
             non_buy_sell_groups = non_buy_sell.groupby('timestamp')
-            # Get unique timestamps
             timestamps = sorted(df['timestamp'].unique())
             for ts in timestamps:
-                # Get buy/sell transactions for this timestamp
                 ts_buy_sell = buy_sell[buy_sell['timestamp'] == ts].copy()
-                # Sort by inventory and asset
                 ts_buy_sell = ts_buy_sell.sort_values(['inventory', 'asset'])
-                # Get non-buy/sell for this timestamp
                 ts_non_buy_sell = non_buy_sell_groups.get_group(ts) if ts in non_buy_sell_groups.groups else pd.DataFrame()
-                # Sort non-buy/sell by inventory and asset
                 ts_non_buy_sell = ts_non_buy_sell.sort_values(['inventory', 'asset'])
-                # Combine, placing non-buy/sell last
                 ts_combined = pd.concat([ts_buy_sell, ts_non_buy_sell], ignore_index=True)
                 final_dfs.append(ts_combined)
             return pd.concat(final_dfs, ignore_index=True)
@@ -161,7 +151,7 @@ if uploaded_file is not None:
 
         df_sorted = verify_running_balance(df_sorted)
 
-        # Check for any test = False, specifically highlighting Global- Asset Holdings and BTC
+        # Check for test = False for Global- Asset Holdings and BTC
         inconsistent_rows = df_sorted[
             (df_sorted['action'].isin(['buy', 'sell'])) & (~df_sorted['test']) &
             (df_sorted['inventory'] == 'Global- Asset Holdings') & (df_sorted['asset'] == 'BTC')
@@ -196,13 +186,13 @@ else:
 st.sidebar.header("Instructions")
 st.sidebar.markdown("""
 1. Upload a CSV file with transaction data.
-2. The file must contain the following columns: `timestamp`, `action`, `asset`, `assetUnitAdj`, `assetBalance`, and an inventory column (e.g., `inventory`, `Inventory`).
-3. If the inventory column is missing, select or enter its name from the provided options.
+2. The file must contain: `timestamp`, `action`, `asset`, `assetUnitAdj`, `assetBalance`, and an inventory column (e.g., `inventory`).
+3. If the inventory column is missing, select it from the dropdown.
 4. The app will sort the transactions:
    - First by `timestamp` (earliest first).
    - Within each timestamp, by `inventory` and then `asset`.
    - For `buy` and `sell` actions, rows are ordered globally to maintain `assetBalance` as the sum of the previous balance and `assetUnitAdj`.
    - Non-`buy`/`sell` actions are placed last within each timestamp.
-5. The output includes `running_balance_recalc` and `test` columns to verify balance consistency, with specific checks for `Global- Asset Holdings` and `BTC`.
+5. The output includes `running_balance_recalc` and `test` columns, with checks for `Global- Asset Holdings` and `BTC`.
 6. Download the sorted CSV file.
 """)
