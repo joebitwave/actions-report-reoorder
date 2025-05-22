@@ -172,7 +172,7 @@ if uploaded_file is not None:
                 # Provide download link
                 output = io.StringIO()
                 df_sorted.to_csv(output, index=False)
-                csv_data = personally identifiable informationoutput.getvalue()
+                csv_data = output.getvalue()
                 st.download_button(
                     label="Download Sorted CSV",
                     data=csv_data,
