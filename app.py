@@ -3,6 +3,7 @@ import pandas as pd
 import base64
 from io import BytesIO
 import time
+from itertools import permutations
 import random
 
 # Streamlit app title
@@ -29,9 +30,9 @@ if uploaded_file is not None:
         'asset': 9,      # Column J
         'assetUnitAdj': 11,  # Column L
         'assetBalance': 12,  # Column M
-        'inventory': 27  # Column AC
+        'inventory': 28  # Column AC
     }
-    if len(df.columns) < 28 or not all(col in df.columns for col in expected_columns):
+    if len(df.columns) < 29 or not all(col in df.columns for col in expected_columns):
         # Fallback to index-based access
         df.columns = [f"col_{i}" for i in range(len(df.columns))]
         df = df.rename(columns={
@@ -176,6 +177,7 @@ if uploaded_file is not None:
                              df['assetBalance'].apply(lambda x: not isinstance(x, (int, float)) and not str(x).replace('.', '').replace('-', '').isdigit())]
         if not non_numeric_rows.empty:
             st.warning(f"Found {len(non_numeric_rows)} rows with non-numeric assetUnitAdj or assetBalance. Using original order for these rows.")
+            st.write("Sample non-numeric rows:", non_numeric_rows[['timestamp', 'inventory', 'asset', 'assetUnitAdj', 'assetBalance']].head().to_dict())
         
         grouped = df.groupby(['timestamp', 'inventory'])
         
@@ -237,7 +239,7 @@ if uploaded_file is not None:
                     else:
                         reordered_indices.extend(buy_sell_ordered.index)
                 
-                # Check for timeout (e.g., 60 seconds)
+                # Check for timeout (60 seconds)
                 if time.time() - start_time > 60:
                     st.warning(f"Processing timeout at timestamp {timestamp}. Including remaining rows in original order.")
                     remaining_indices = df.index[~df.index.isin(reordered_indices)]
@@ -257,6 +259,9 @@ if uploaded_file is not None:
         
         if not reordered_df['timestamp'].astype(str).is_monotonic_increasing:
             st.warning("Output rows are not in strict chronological order.")
+        
+        # Log processing time
+        st.write(f"Processing time: {time.time() - start_time:.2f} seconds")
         
         return reordered_df
 
