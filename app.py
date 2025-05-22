@@ -24,12 +24,34 @@ if uploaded_file is not None:
         # Read the CSV file
         df = pd.read_csv(uploaded_file)
 
-        # Validate required columns
-        required_columns = ['timestamp', 'action', 'asset', 'assetUnitAdj', 'assetBalance', 'inventory']
+        # Define required columns and possible aliases for inventory
+        required_columns = ['timestamp', 'action', 'asset', 'assetUnitAdj', 'assetBalance']
+        inventory_aliases = ['inventory', 'Inventory', 'inventory_name', 'inv']
+
+        # Check for required columns
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
             st.error(f"Missing required columns: {', '.join(missing_columns)}")
         else:
+            # Find inventory column
+            inventory_col = None
+            for alias in inventory_aliases:
+                if alias in df.columns:
+                    inventory_col = alias
+                    break
+
+            if inventory_col is None:
+                st.error("No 'inventory' column found. Please specify the column name.")
+                inventory_col = st.text_input("Enter the name of the inventory column:", "")
+                if inventory_col and inventory_col in df.columns:
+                    df = df.rename(columns={inventory_col: 'inventory'})
+                else:
+                    st.error("Specified inventory column not found in the CSV.")
+                    st.stop()
+            else:
+                if inventory_col != 'inventory':
+                    df = df.rename(columns={inventory_col: 'inventory'})
+
             # Convert timestamp to datetime
             df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce', utc=True)
             if df['timestamp'].isna().any():
@@ -74,8 +96,6 @@ if uploaded_file is not None:
                                         (remaining['assetUnitAdj'] + last_balance) - remaining['assetBalance']
                                     )
                                     next_row = remaining.nsmallest(1, 'balance_diff')
-                                    # Optional debug logging (uncomment for troubleshooting)
-                                    # st.warning(f"Inconsistent running balance for inventory {inv}, asset {asset} at timestamp {result.iloc[-1]['timestamp']}. Closest match used.")
 
                                 # Add the first matching row
                                 result = pd.concat([result, next_row.iloc[[0]]], ignore_index=True)
@@ -152,7 +172,7 @@ if uploaded_file is not None:
                 # Provide download link
                 output = io.StringIO()
                 df_sorted.to_csv(output, index=False)
-                csv_data = output.getvalue()
+                csv_data = personally identifiable informationoutput.getvalue()
                 st.download_button(
                     label="Download Sorted CSV",
                     data=csv_data,
@@ -169,12 +189,13 @@ else:
 st.sidebar.header("Instructions")
 st.sidebar.markdown("""
 1. Upload a CSV file with transaction data.
-2. The file must contain the following columns: `timestamp`, `action`, `asset`, `assetUnitAdj`, `assetBalance`, `inventory`.
-3. The app will sort the transactions:
+2. The file must contain the following columns: `timestamp`, `action`, `asset`, `assetUnitAdj`, `assetBalance`, and an inventory column (e.g., `inventory`, `Inventory`).
+3. If the inventory column is missing, enter its name in the provided input field.
+4. The app will sort the transactions:
    - First by `timestamp` (earliest first).
    - Within each timestamp, by `inventory` and then `asset`.
    - For `buy` and `sell` actions, rows are ordered globally to maintain `assetBalance` as the sum of the previous balance and `assetUnitAdj`.
    - Non-`buy`/`sell` actions are placed last within each timestamp.
-4. The output includes `running_balance_recalc` and `test` columns to verify balance consistency, with specific checks for `Global- Asset Holdings` and `BTC`.
-5. Download the sorted CSV file.
+5. The output includes `running_balance_recalc` and `test` columns to verify balance consistency, with specific checks for `Global- Asset Holdings` and `BTC`.
+6. Download the sorted CSV file.
 """)
