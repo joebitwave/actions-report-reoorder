@@ -18,9 +18,10 @@ def find_valid_permutation(rows, start_balance):
     """
     Find a permutation of rows where assetBalance = previous assetBalance + assetUnitAdj.
     Start with a row where assetBalance equals assetUnitAdj.
+    Returns None if no valid permutation is found.
     """
-    if not rows:
-        return rows
+    if rows.empty:
+        return None
     
     # Try each row as the starting point
     for start_idx in range(len(rows)):
@@ -90,12 +91,12 @@ if uploaded_file is not None:
                             # Find valid permutation for this timestamp
                             valid_order = find_valid_permutation(ts_group, None)
                             if valid_order is None:
-                                st.error(f"No valid order found for asset '{asset}' and inventory '{inventory}' at timestamp '{ts}'.")
+                                st.error(f"No valid order found for asset '{asset}' and inventory '{inventory}' at timestamp '{ts}'. Rows:\n{ts_group[['timestamp', 'action', 'assetUnitAdj', 'assetBalance']].to_string()}")
                                 raise ValueError(f"Cannot satisfy assetBalance condition for {asset} in {inventory} at {ts}")
                             ordered_action_rows.append(valid_order)
 
                         # Concatenate ordered action rows
-                        action_rows = pd.concat(ordered_action_rows, ignore_index=True) if ordered_action_rows else pd.DataFrame()
+                        action_rows = pd.concat(ordered_action_rows, ignore_index=True) if ordered_action_rows else pd.DataFrame(columns=action_rows.columns)
 
                     # Append non-action rows (place last for each timestamp)
                     if not non_action_rows.empty:
