@@ -4,12 +4,10 @@ import base64
 from io import BytesIO
 import time
 import random
-from itertools import permutations
-from datetime import datetime
 import logging
 import sys
 
-# Set up logging with fallback to stdout if file is not writable
+# Set up logging with fallback to stdout
 try:
     logging.basicConfig(
         filename='streamlit_app.log',
@@ -38,8 +36,9 @@ if uploaded_file is not None:
     # Read the CSV file
     try:
         logging.info("Reading CSV file")
-        df = pd.read_csv(uploaded_file, encoding='utf-8')
-        df = df.fillna('')  # Replace NaN with empty string
+        # Use chunksize for large CSVs
+        df_chunks = pd.read_csv(uploaded_file, encoding='utf-8', chunksize=10000)
+        df = pd.concat([chunk.fillna('') for chunk in df_chunks])
         logging.info(f"CSV read successfully: {len(df)} rows")
     except Exception as e:
         logging.error(f"Error reading CSV: {str(e)}")
@@ -69,15 +68,21 @@ if uploaded_file is not None:
         logging.info("Columns mapped successfully")
 
     # Ensure string types and convert numeric columns
-    df['timestamp'] = df['timestamp'].astype(str)
-    df['action'] = df['action'].astype(str)
-    df['asset'] = df['asset'].astype(str).fillna('Unknown')
-    df['inventory'] = df['inventory'].astype(str).fillna('Unknown')
-    
-    # Convert numeric columns
-    df['assetUnitAdj'] = pd.to_numeric(df['assetUnitAdj'], errors='coerce').fillna(0)
-    df['assetBalance'] = pd.to_numeric(df['assetBalance'], errors='coerce').fillna(0)
-    
+    try:
+        logging.info("Converting column types")
+        df['timestamp'] = df['timestamp'].astype(str)
+        df['action'] = df['action'].astype(str)
+        df['asset'] = df['asset'].astype(str).fillna('Unknown')
+        df['inventory'] = df['inventory'].astype(str).fillna('Unknown')
+        df['assetUnitAdj'] = pd.to_numeric(df['assetUnitAdj'], errors='coerce').fillna(0)
+        df['assetBalance'] = pd.to_numeric(df['assetBalance'], errors='coerce').fillna(0)
+        logging.info("Column types converted")
+    except Exception as e:
+        logging.error(f"Error converting column types: {str(e)}")
+        status_text.empty()
+        st.error(f"Error converting column types: {str(e)}")
+        st.stop()
+
     # Debug information in an expander
     with st.expander("Debug Information"):
         st.write("Column names:", list(df.columns))
@@ -125,19 +130,122 @@ if uploaded_file is not None:
             balance = current_balance
         return True
 
-    # Optimized greedy permutation finder
-    def find_valid_permutation(group, prev_balance=None, prioritize_initial=False, max_rows=3):
+    # Optimized greedy permutation finder (no permutations, only greedy)
+    def find_valid_permutation(group, prev_balance=None, prioritize_initial=False, max_rows=0):
         indices = list(range(len(group)))
-        if len(indices) > max_rows:
-            logging.info(f"Large group ({len(indices)} rows), using greedy approach")
-            ordered = []
-            remaining = indices.copy()
-            balance = prev_balance
-            if prioritize_initial:
-                initial_indices = [
-                    i for i in indices 
-                    if abs(float(group.iloc[i]['assetUnitAdj']) - float(group.iloc[i]['assetBalance'])) < 1e-6
-                ]
-                if initial_indices:
-                    start_idx = initial_indices[0]
-                    ordered
+        logging.info(f"Processing group with {len(indices)} rows, using greedy approach")
+        ordered = []
+        remaining = indices.copy()
+        balance = prev_balance
+        if prioritize_initial:
+            initial_indices = [
+                i for i in indices 
+                if abs(float(group.iloc[i]['assetUnitAdj']) - float(group.iloc[i]['assetBalance'])) < 1e-6
+            ]
+            if initial_indices:
+                start_idx = initial_indices[0]
+                ordered.append(start_idx)
+                remaining.remove(start_idx)
+                balance = float(group.iloc[start_idx]['assetBalance'])
+
+        while remaining:
+            next_idx = None
+            for idx in remaining:
+                row = group.iloc[idx]
+                try:
+                    units = float(row['assetUnitAdj'])
+                    current_balance = float(row['assetBalance'])
+                    expected_balance = balance + units if balance is not None else current_balance
+                    if abs(expected_balance - current_balance) < 1e-6:
+                        next_idx = idx
+                        break
+                except (ValueError, TypeError):
+                    continue
+            if next_idx is None:
+                break
+            ordered.append(next_idx)
+            remaining.remove(next_idx)
+            balance = float(group.iloc[next_idx]['assetBalance'])
+
+        ordered.extend(remaining)
+        if is_valid_order(group, ordered, prev_balance):
+            return [group.index[i] for i in ordered]
+        logging.warning(f"No valid order found for group, returning original order")
+        return [group.index[i] for i in indices]
+
+    # Reorder the DataFrame
+    def reorder_dataframe(df, timeout=60):
+        df = df.copy()
+        logging.info("Starting DataFrame reordering")
+        # Convert timestamps to datetime
+        try:
+            logging.info("Converting timestamps")
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+            invalid_timestamps = df[df['timestamp'].isna()]
+            if not invalid_timestamps.empty:
+                logging.warning(f"Found {len(invalid_timestamps)} rows with invalid timestamps")
+            df = df.sort_values(by='timestamp', kind='mergesort')
+            logging.info("Timestamps converted and sorted")
+        except Exception as e:
+            logging.error(f"Error sorting by timestamp: {str(e)}")
+            st.error(f"Error sorting by timestamp: {str(e)}")
+            st.stop()
+
+        reordered_indices = []
+        balance_tracker = {}
+        start_time = time.time()
+        
+        try:
+            grouped = df.groupby(['timestamp', 'inventory'])
+            unique_timestamps = sorted(df['timestamp'].dropna().unique())
+            progress_bar = st.progress(0)
+            total_steps = len(unique_timestamps)
+            
+            for step, timestamp in enumerate(unique_timestamps):
+                logging.info(f"Processing timestamp: {timestamp}")
+                timestamp_rows = df[df['timestamp'] == timestamp]
+                for inventory in sorted(timestamp_rows['inventory'].unique()):
+                    logging.info(f"Processing inventory: {inventory}")
+                    try:
+                        t_inv_group = grouped.get_group((timestamp, inventory))
+                        logging.info(f"Inventory group size: {len(t_inv_group)} rows")
+                    except KeyError:
+                        t_inv_group = timestamp_rows[timestamp_rows['inventory'] == inventory]
+                        reordered_indices.extend(t_inv_group.index)
+                        logging.warning(f"Group not found for timestamp {timestamp}, inventory {inventory}")
+                        st.warning(f"Group not found for timestamp {timestamp}, inventory {inventory}. Using original order.")
+                        continue
+
+                    t_inv_group = t_inv_group.sort_index()
+                    asset_groups = t_inv_group.groupby('asset')
+
+                    for asset in sorted(t_inv_group['asset'].unique()):
+                        logging.info(f"Processing asset: {asset}")
+                        try:
+                            t_group = asset_groups.get_group(asset)
+                            logging.info(f"Asset group size: {len(t_group)} rows")
+                        except KeyError:
+                            t_group = t_inv_group[t_inv_group['asset'] == asset]
+                            reordered_indices.extend(t_group.index)
+                            logging.warning(f"Asset group not found for {inventory}, {asset} at {timestamp}")
+                            st.warning(f"Asset group not found for {inventory}, {asset} at {timestamp}. Using original order.")
+                            continue
+
+                        buy_sell_rows = t_group[t_group['action'].str.lower().isin(["buy", "sell"])]
+                        non_buy_sell_rows = t_group[~t_group['action'].str.lower().isin(["buy", "sell"])]
+
+                        prev_balance = balance_tracker.get((inventory, asset), None)
+                        is_earliest = timestamp == df[(df['inventory'] == inventory) & (df['asset'] == asset)]['timestamp'].min()
+
+                        if len(buy_sell_rows) > 1:
+                            logging.info(f"Ordering {len(buy_sell_rows)} buy/sell rows")
+                            valid_order = find_valid_permutation(buy_sell_rows, prev_balance, prioritize_initial=is_earliest)
+                            buy_sell_ordered = buy_sell_rows.loc[valid_order]
+                            try:
+                                balance_tracker[(inventory, asset)] = float(buy_sell_ordered.iloc[-1]['assetBalance'])
+                            except (ValueError, TypeError):
+                                logging.error(f"Failed to update balance for {inventory}, {asset}")
+                        elif len(buy_sell_rows) == 1:
+                            row = buy_sell_rows.iloc[0]
+                            try:
+                                units = float(row['
