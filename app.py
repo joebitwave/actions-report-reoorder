@@ -248,4 +248,117 @@ if uploaded_file is not None:
                         elif len(buy_sell_rows) == 1:
                             row = buy_sell_rows.iloc[0]
                             try:
-                                units = float(row['
+                                units = float(row['assetUnitAdj'])
+                                current_balance = float(row['assetBalance'])
+                                if prev_balance is not None:
+                                    expected_balance = prev_balance + units
+                                    if abs(expected_balance - current_balance) > 1e-6:
+                                        logging.warning(
+                                            f"Balance mismatch for {inventory}, {asset} at {timestamp}: "
+                                            f"expected {expected_balance}, got {current_balance}. "
+                                            f"Prev balance: {prev_balance}, Units: {units}, Action: {row['action']}"
+                                        )
+                                        st.warning(
+                                            f"Balance mismatch for {inventory}, {asset} at {timestamp}: "
+                                            f"expected {expected_balance}, got {current_balance}"
+                                        )
+                                buy_sell_ordered = buy_sell_rows
+                                balance_tracker[(inventory, asset)] = current_balance
+                            except (ValueError, TypeError):
+                                buy_sell_ordered = buy_sell_rows
+                                logging.error(f"Invalid data in single row for {inventory}, {asset}")
+                        else:
+                            buy_sell_ordered = buy_sell_rows
+
+                        if not non_buy_sell_rows.empty:
+                            combined = pd.concat([buy_sell_ordered, non_buy_sell_rows]).sort_index()
+                            reordered_indices.extend(combined.index)
+                        else:
+                            reordered_indices.extend(buy_sell_ordered.index)
+
+                    # Check for timeout
+                    elapsed_time = time.time() - start_time
+                    if elapsed_time > timeout:
+                        logging.warning(f"Timeout at timestamp {timestamp} after {elapsed_time:.2f} seconds")
+                        st.warning(f"Processing timeout at timestamp {timestamp}. Including remaining rows in original order.")
+                        remaining_indices = df.index[~df.index.isin(reordered_indices)]
+                        reordered_indices.extend(remaining_indices)
+                        break
+
+                if elapsed_time > timeout:
+                    break
+
+                # Update progress
+                progress_bar.progress((step + 1) / total_steps)
+
+        except Exception as e:
+            logging.error(f"Error during group processing: {str(e)}")
+            st.warning(f"Error during processing: {str(e)}. Including remaining rows in original order.")
+            remaining_indices = df.index[~df.index.isin(reordered_indices)]
+            reordered_indices.extend(remaining_indices)
+
+        remaining_indices = df.index[~df.index.isin(reordered_indices)]
+        if remaining_indices.size > 0:
+            logging.warning(f"Unprocessed rows: {len(remaining_indices)}")
+            st.warning(f"Found {len(remaining_indices)} rows not processed. Including them in original order.")
+            reordered_indices.extend(remaining_indices)
+
+        if len(reordered_indices) != len(df):
+            logging.error(f"Row count mismatch: expected {len(df)}, got {len(reordered_indices)}")
+            st.error(f"Row count mismatch: expected {len(df)} rows, got {len(reordered_indices)}.")
+            st.stop()
+
+        reordered_df = df.loc[reordered_indices].reset_index(drop=True)
+        
+        # Check monotonicity
+        if not reordered_df['timestamp'].astype(str).is_monotonic_increasing:
+            logging.warning("Output rows not in chronological order")
+            st.warning("Output rows are not in strict chronological order.")
+
+        # Log processing time
+        processing_time = time.time() - start_time
+        logging.info(f"Processing completed in {processing_time:.2f} seconds")
+        status_text.empty()
+        st.write(f"Processing time: {processing_time:.2f} seconds")
+        
+        return reordered_df
+
+    # Process the CSV
+    try:
+        logging.info("Starting CSV processing")
+        reordered_df = reorder_dataframe(df, timeout=60)
+        logging.info("CSV processing completed")
+        status_text.empty()
+        st.write(f"Reordered CSV Data ({len(reordered_df)} rows):")
+        st.dataframe(reordered_df)
+
+        def get_csv_download_link(df, filename="reordered_actions_report.csv"):
+            try:
+                csv_buffer = BytesIO()
+                df.to_csv(csv_buffer, index=False)
+                csv_buffer.seek(0)
+                b64 = base64.b64encode(csv_buffer.read()).decode()
+                href = f'<a href="data:file/csv;base64,{b64}" download="{filename}">Download Reordered CSV</a>'
+                return href
+            except Exception as e:
+                logging.error(f"Error generating download link: {str(e)}")
+                st.error(f"Error generating download link: {str(e)}")
+                return None
+
+        download_link = get_csv_download_link(reordered_df)
+        if download_link:
+            st.markdown(download_link, unsafe_allow_html=True)
+            logging.info("Download link generated")
+        else:
+            st.error("Failed to generate download link.")
+    except Exception as e:
+        logging.error(f"Error processing CSV: {str(e)}")
+        status_text.empty()
+        st.error(f"Error processing the CSV: {str(e)}")
+        st.write("Available columns:", list(df.columns))
+        st.write("Please ensure the CSV has the required columns.")
+        # Fallback: provide original CSV as output
+        st.write("Providing original CSV as fallback output:")
+        download_link = get_csv_download_link(df, filename="original_actions_report.csv")
+        if download_link:
+            st.markdown(download_link, unsafe_allow_html=True)
