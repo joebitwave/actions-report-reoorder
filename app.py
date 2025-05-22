@@ -6,6 +6,11 @@ import time
 import random
 from itertools import permutations
 from datetime import datetime
+import logging
+
+# Set up logging
+logging.basicConfig(filename='streamlit_app.log', level=logging.DEBUG, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Streamlit app title
 st.title("Actions Report Reorder App")
@@ -16,9 +21,12 @@ uploaded_file = st.file_uploader("Upload your Actions Report CSV", type=["csv"])
 if uploaded_file is not None:
     # Read the CSV file
     try:
+        logging.info("Reading CSV file")
         df = pd.read_csv(uploaded_file, encoding='utf-8')
         df = df.fillna('')  # Replace NaN with empty string
+        logging.info(f"CSV read successfully: {len(df)} rows")
     except Exception as e:
+        logging.error(f"Error reading CSV: {str(e)}")
         st.error(f"Error reading CSV: {str(e)}")
         st.write("Please ensure the CSV is properly formatted with headers.")
         st.stop()
@@ -40,6 +48,7 @@ if uploaded_file is not None:
             st.error("Please map all required columns.")
             st.stop()
         df = df.rename(columns={v: k for k, v in col_mapping.items() if v != k})
+        logging.info("Columns mapped successfully")
 
     # Ensure string types and convert numeric columns
     df['timestamp'] = df['timestamp'].astype(str)
@@ -62,6 +71,7 @@ if uploaded_file is not None:
         if not non_numeric_rows.empty:
             st.warning(f"Found {len(non_numeric_rows)} rows with non-numeric assetUnitAdj or assetBalance. Set to 0.")
             st.write("Sample non-numeric rows:", non_numeric_rows[['timestamp', 'inventory', 'asset']].head().to_dict())
+            logging.warning(f"Non-numeric rows found: {len(non_numeric_rows)}")
 
     # Display original data
     st.write(f"Original CSV Data ({len(df)} rows):")
@@ -74,34 +84,41 @@ if uploaded_file is not None:
             try:
                 balance = float(group.iloc[indices[0]]['assetBalance'])
             except (ValueError, TypeError):
+                logging.error(f"Invalid initial balance for group: {group.iloc[indices[0]]}")
                 return False
 
         for idx in indices:
             row = group.iloc[idx]
-            action = row['action'].lower()
             try:
                 units = float(row['assetUnitAdj'])
                 current_balance = float(row['assetBalance'])
             except (ValueError, TypeError):
+                logging.error(f"Invalid units or balance for row: {row}")
                 return False
 
-            # Use assetUnitAdj directly, accounting for its sign
             expected_balance = balance + units
             if abs(expected_balance - current_balance) > tolerance:
+                logging.warning(
+                    f"Balance validation failed: expected {expected_balance}, got {current_balance}, "
+                    f"units {units}, action {row['action']}"
+                )
                 return False
             balance = current_balance
         return True
 
     # Optimized greedy permutation finder
-    def find_valid_permutation(group, prev_balance=None, prioritize_initial=False, max_rows=10):
+    def find_valid_permutation(group, prev_balance=None, prioritize_initial=False, max_rows=5):
         indices = list(range(len(group)))
         if len(indices) > max_rows:
-            # Greedy approach with backtracking
+            logging.info(f"Large group ({len(indices)} rows), using greedy approach")
             ordered = []
             remaining = indices.copy()
             balance = prev_balance
             if prioritize_initial:
-                initial_indices = [i for i in indices if abs(float(group.iloc[i]['assetUnitAdj']) - float(group.iloc[i]['assetBalance'])) < 1e-6]
+                initial_indices = [
+                    i for i in indices 
+                    if abs(float(group.iloc[i]['assetUnitAdj']) - float(group.iloc[i]['assetBalance'])) < 1e-6
+                ]
                 if initial_indices:
                     start_idx = initial_indices[0]
                     ordered.append(start_idx)
@@ -115,7 +132,7 @@ if uploaded_file is not None:
                     try:
                         units = float(row['assetUnitAdj'])
                         current_balance = float(row['assetBalance'])
-                        expected_balance = balance + units
+                        expected_balance = balance + units if balance is not None else current_balance
                         if abs(expected_balance - current_balance) < 1e-6:
                             next_idx = idx
                             break
@@ -130,11 +147,15 @@ if uploaded_file is not None:
             ordered.extend(remaining)
             if is_valid_order(group, ordered, prev_balance):
                 return [group.index[i] for i in ordered]
-            return [group.index[i] for i in indices]  # Fallback to original order
+            logging.warning(f"No valid order found for group, returning original order")
+            return [group.index[i] for i in indices]
         else:
-            # Small groups: try permutations with prioritization
+            logging.info(f"Small group ({len(indices)} rows), trying permutations")
             if prioritize_initial:
-                initial_indices = [i for i in indices if abs(float(group.iloc[i]['assetUnitAdj']) - float(group.iloc[i]['assetBalance'])) < 1e-6]
+                initial_indices = [
+                    i for i in indices 
+                    if abs(float(group.iloc[i]['assetUnitAdj']) - float(group.iloc[i]['assetBalance'])) < 1e-6
+                ]
                 for start_idx in initial_indices:
                     other_indices = [i for i in indices if i != start_idx]
                     for perm in permutations(other_indices):
@@ -144,16 +165,21 @@ if uploaded_file is not None:
             for perm in permutations(indices):
                 if is_valid_order(group, perm, prev_balance):
                     return [group.index[i] for i in perm]
-            return [group.index[i] for i in indices]  # Fallback to original order
+            logging.warning(f"No valid permutation found for group, returning original order")
+            return [group.index[i] for i in indices]
 
     # Reorder the DataFrame
     def reorder_dataframe(df, timeout=60):
         df = df.copy()
+        logging.info("Starting DataFrame reordering")
         # Convert timestamps to datetime
         try:
+0
             df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
             df = df.sort_values(by='timestamp', kind='mergesort')
+            logging.info("Timestamps converted and sorted")
         except Exception as e:
+            logging.error(f"Error sorting by timestamp: {str(e)}")
             st.error(f"Error sorting by timestamp: {str(e)}")
             st.stop()
 
@@ -162,18 +188,21 @@ if uploaded_file is not None:
         start_time = time.time()
         
         grouped = df.groupby(['timestamp', 'inventory'])
-        unique_timestamps = sorted(df['timestamp'].unique())
+        unique_timestamps = sorted(df['timestamp'].dropna().unique())
         progress_bar = st.progress(0)
         total_steps = len(unique_timestamps)
         
         for step, timestamp in enumerate(unique_timestamps):
+            logging.info(f"Processing timestamp: {timestamp}")
             timestamp_rows = df[df['timestamp'] == timestamp]
             for inventory in sorted(timestamp_rows['inventory'].unique()):
                 try:
                     t_inv_group = grouped.get_group((timestamp, inventory))
+                    logging.info(f"Processing inventory {inventory} with {len(t_inv_group)} rows")
                 except KeyError:
                     t_inv_group = timestamp_rows[timestamp_rows['inventory'] == inventory]
                     reordered_indices.extend(t_inv_group.index)
+                    logging.warning(f"Group not found for timestamp {timestamp}, inventory {inventory}")
                     st.warning(f"Group not found for timestamp {timestamp}, inventory {inventory}. Using original order.")
                     continue
 
@@ -183,9 +212,11 @@ if uploaded_file is not None:
                 for asset in sorted(t_inv_group['asset'].unique()):
                     try:
                         t_group = asset_groups.get_group(asset)
+                        logging.info(f"Processing asset {asset} with {len(t_group)} rows")
                     except KeyError:
                         t_group = t_inv_group[t_inv_group['asset'] == asset]
                         reordered_indices.extend(t_group.index)
+                        logging.warning(f"Asset group not found for {inventory}, {asset} at {timestamp}")
                         st.warning(f"Asset group not found for {inventory}, {asset} at {timestamp}. Using original order.")
                         continue
 
@@ -201,7 +232,7 @@ if uploaded_file is not None:
                         try:
                             balance_tracker[(inventory, asset)] = float(buy_sell_ordered.iloc[-1]['assetBalance'])
                         except (ValueError, TypeError):
-                            pass
+                            logging.error(f"Failed to update balance for {inventory}, {asset}")
                     elif len(buy_sell_rows) == 1:
                         row = buy_sell_rows.iloc[0]
                         try:
@@ -210,15 +241,20 @@ if uploaded_file is not None:
                             if prev_balance is not None:
                                 expected_balance = prev_balance + units
                                 if abs(expected_balance - current_balance) > 1e-6:
-                                    st.warning(
+                                    logging.warning(
                                         f"Balance mismatch for {inventory}, {asset} at {timestamp}: "
                                         f"expected {expected_balance}, got {current_balance}. "
                                         f"Prev balance: {prev_balance}, Units: {units}, Action: {row['action']}"
+                                    )
+                                    st.warning(
+                                        f"Balance mismatch for {inventory}, {asset} at {timestamp}: "
+                                        f"expected {expected_balance}, got {current_balance}"
                                     )
                             buy_sell_ordered = buy_sell_rows
                             balance_tracker[(inventory, asset)] = current_balance
                         except (ValueError, TypeError):
                             buy_sell_ordered = buy_sell_rows
+                            logging.error(f"Invalid data in single row for {inventory}, {asset}")
                     else:
                         buy_sell_ordered = buy_sell_rows
 
@@ -230,6 +266,7 @@ if uploaded_file is not None:
 
                 # Check for timeout
                 if time.time() - start_time > timeout:
+                    logging.warning(f"Timeout at timestamp {timestamp}")
                     st.warning(f"Processing timeout at timestamp {timestamp}. Including remaining rows in original order.")
                     remaining_indices = df.index[~df.index.isin(reordered_indices)]
                     reordered_indices.extend(remaining_indices)
@@ -240,10 +277,12 @@ if uploaded_file is not None:
 
         remaining_indices = df.index[~df.index.isin(reordered_indices)]
         if remaining_indices.size > 0:
+            logging.warning(f"Unprocessed rows: {len(remaining_indices)}")
             st.warning(f"Found {len(remaining_indices)} rows not processed. Including them in original order.")
             reordered_indices.extend(remaining_indices)
 
         if len(reordered_indices) != len(df):
+            logging.error(f"Row count mismatch: expected {len(df)}, got {len(reordered_indices)}")
             st.error(f"Row count mismatch: expected {len(df)} rows, got {len(reordered_indices)}.")
             st.stop()
 
@@ -251,16 +290,21 @@ if uploaded_file is not None:
         
         # Check monotonicity
         if not reordered_df['timestamp'].astype(str).is_monotonic_increasing:
+            logging.warning("Output rows not in chronological order")
             st.warning("Output rows are not in strict chronological order.")
 
         # Log processing time
-        st.write(f"Processing time: {time.time() - start_time:.2f} seconds")
+        processing_time = time.time() - start_time
+        logging.info(f"Processing completed in {processing_time:.2f} seconds")
+        st.write(f"Processing time: {processing_time:.2f} seconds")
         
         return reordered_df
 
     # Process the CSV
     try:
-        reordered_df = reorder_dataframe(df)
+        logging.info("Starting CSV processing")
+        reordered_df = reorder_dataframe(df, timeout=60)
+        logging.info("CSV processing completed")
         st.write(f"Reordered CSV Data ({len(reordered_df)} rows):")
         st.dataframe(reordered_df)
 
@@ -273,7 +317,9 @@ if uploaded_file is not None:
             return href
 
         st.markdown(get_csv_download_link(reordered_df), unsafe_allow_html=True)
+        logging.info("Download link generated")
     except Exception as e:
+        logging.error(f"Error processing CSV: {str(e)}")
         st.error(f"Error processing the CSV: {str(e)}")
         st.write("Available columns:", list(df.columns))
         st.write("Please ensure the CSV has the required columns.")
